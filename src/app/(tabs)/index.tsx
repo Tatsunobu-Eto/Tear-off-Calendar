@@ -15,18 +15,23 @@ import {
 import { Image } from 'expo-image';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
-import { router } from 'expo-router';
+import * as Calendar from 'expo-calendar';
+import { useFocusEffect } from 'expo-router';
 
 import { useSettingsStore } from '@/store/settingsStore';
-import { useEventStore } from '@/store/eventStore';
-import type { CalendarEvent } from '@/types/event';
-import { exportEventToNativeCalendar } from '@/utils/nativeCalendar';
+import { useNativeCalendarStore } from '@/store/nativeCalendarStore';
+import type { NativeCalendarEvent } from '@/types/event';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const CARD_WIDTH = SCREEN_WIDTH * 0.88;
+const CARD_HEIGHT = SCREEN_HEIGHT * 0.70;
+const IMAGE_HEADER_H = CARD_HEIGHT * 0.36;
+const NO_IMAGE_HEADER_H = CARD_HEIGHT * 0.18;
+const BINDING_H = 32;
+const DATE_SECTION_H = 150;
 
 const DAY_OF_WEEK = ['日', '月', '火', '水', '木', '金', '土'];
-const MAX_VISIBLE_EVENTS = 3; // スクロール前に表示する最大件数
+const MAX_COLLAPSED_EVENTS = 3;
 
 const getBackgroundGradient = (theme: string): [string, string] => {
   switch (theme) {
@@ -45,46 +50,46 @@ const getDayColor = (day: number) => {
 const toDateStr = (d: Date) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
-// ── イベント1件のコンポーネント ──────────────────────────────────────────
-function EventItem({
-  event,
-  onPress,
-}: {
-  event: CalendarEvent;
-  onPress: (evt: CalendarEvent) => void;
-}) {
-  const isBirthday = event.type === 'birthday';
+const formatTime = (date: Date) =>
+  `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+
+// ── 予定 1 件 ────────────────────────────────────────────────────────────
+function EventItem({ event, onPress }: { event: NativeCalendarEvent; onPress: (e: NativeCalendarEvent) => void }) {
   return (
     <TouchableOpacity
       style={[
         styles.eventTag,
-        {
-          backgroundColor: isBirthday ? 'rgba(255,107,107,0.10)' : 'rgba(78,205,196,0.10)',
-          borderLeftColor: isBirthday ? '#ff6b6b' : '#4ecdc4',
-        },
+        { backgroundColor: `${event.calendarColor}1A`, borderLeftColor: event.calendarColor },
       ]}
       onPress={() => onPress(event)}
       activeOpacity={0.7}
     >
-      <Text style={styles.eventIcon}>{isBirthday ? '🎂' : '📌'}</Text>
-      <Text
-        style={[styles.eventText, { color: isBirthday ? '#c0392b' : '#16a085' }]}
-        numberOfLines={1}
-      >
-        {event.title}
-      </Text>
+      <Text style={styles.eventIcon}>📅</Text>
+      <View style={{ flex: 1 }}>
+        <Text
+          style={[styles.eventText, { color: '#1a1a2e' }]}
+          numberOfLines={1}
+        >
+          {event.title}
+        </Text>
+        {!event.isAllDay && (
+          <Text style={styles.eventTime}>{formatTime(event.startDate)}</Text>
+        )}
+      </View>
       <Text style={styles.eventChevron}>›</Text>
     </TouchableOpacity>
   );
 }
 
-// ── 予定リスト（多い場合はスクロール＋折りたたみ） ────────────────────────
+// ── 予定リスト ────────────────────────────────────────────────────────────
 function EventList({
   events,
   onEventPress,
+  availableHeight,
 }: {
-  events: CalendarEvent[];
-  onEventPress: (evt: CalendarEvent) => void;
+  events: NativeCalendarEvent[];
+  onEventPress: (e: NativeCalendarEvent) => void;
+  availableHeight: number;
 }) {
   const [expanded, setExpanded] = useState(false);
 
@@ -92,68 +97,65 @@ function EventList({
     return (
       <View style={styles.emptyState}>
         <Text style={styles.emptyIcon}>📅</Text>
-        <Text style={styles.noEventsText}>今日の予定はありません</Text>
+        <Text style={styles.noEventsText}>予定はありません</Text>
         <Text style={styles.noEventsHint}>＋ から予定を追加できます</Text>
       </View>
     );
   }
 
-  const visibleEvents = expanded ? events : events.slice(0, MAX_VISIBLE_EVENTS);
-  const hiddenCount = events.length - MAX_VISIBLE_EVENTS;
+  const visibleEvents = expanded ? events : events.slice(0, MAX_COLLAPSED_EVENTS);
+  const hiddenCount = events.length - MAX_COLLAPSED_EVENTS;
 
   return (
-    <View style={styles.eventListWrapper}>
+    <ScrollView
+      style={{ maxHeight: availableHeight - (events.length > MAX_COLLAPSED_EVENTS ? 32 : 0) }}
+      contentContainerStyle={styles.eventScrollContent}
+      nestedScrollEnabled
+      showsVerticalScrollIndicator={false}
+    >
       {visibleEvents.map((evt) => (
         <EventItem key={evt.id} event={evt} onPress={onEventPress} />
       ))}
 
-      {/* 折りたたみ展開ボタン */}
-      {events.length > MAX_VISIBLE_EVENTS && (
+      {events.length > MAX_COLLAPSED_EVENTS && (
         <TouchableOpacity
           style={styles.expandButton}
           onPress={() => setExpanded((v) => !v)}
           activeOpacity={0.7}
         >
           <Text style={styles.expandButtonText}>
-            {expanded
-              ? '▲ 折りたたむ'
-              : `▼ あと ${hiddenCount} 件を表示`}
+            {expanded ? '▲ 折りたたむ' : `▼ あと ${hiddenCount} 件を表示`}
           </Text>
         </TouchableOpacity>
       )}
-    </View>
+    </ScrollView>
   );
 }
 
-// ── アクションシート（Android向けのインラインシート） ─────────────────────
+// ── Android カスタムボトムシート ─────────────────────────────────────────
 function EventActionSheet({
   event,
   onClose,
   onEdit,
   onDelete,
-  onExport,
 }: {
-  event: CalendarEvent | null;
+  event: NativeCalendarEvent | null;
   onClose: () => void;
-  onEdit: (evt: CalendarEvent) => void;
-  onDelete: (evt: CalendarEvent) => void;
-  onExport: (evt: CalendarEvent) => void;
+  onEdit: (e: NativeCalendarEvent) => void;
+  onDelete: (e: NativeCalendarEvent) => void;
 }) {
   if (!event) return null;
-
   return (
     <TouchableOpacity style={styles.sheetOverlay} onPress={onClose} activeOpacity={1}>
       <View style={styles.sheetContainer}>
-        {/* ハンドル */}
         <View style={styles.sheetHandle} />
-        {/* タイトル */}
         <Text style={styles.sheetTitle} numberOfLines={2}>
-          {event.type === 'birthday' ? '🎂' : '📌'} {event.title}
+          📅 {event.title}
         </Text>
-        <Text style={styles.sheetDate}>{event.date}</Text>
-
+        <Text style={styles.sheetDate}>
+          {toDateStr(event.startDate)}{!event.isAllDay ? ` ${formatTime(event.startDate)}` : ''}
+        </Text>
         <View style={styles.sheetDivider} />
-
         <TouchableOpacity
           style={styles.sheetAction}
           onPress={() => { onClose(); onEdit(event); }}
@@ -161,15 +163,6 @@ function EventActionSheet({
           <Text style={styles.sheetActionIcon}>✏️</Text>
           <Text style={styles.sheetActionText}>編集する</Text>
         </TouchableOpacity>
-
-        <TouchableOpacity
-          style={styles.sheetAction}
-          onPress={() => { onClose(); onExport(event); }}
-        >
-          <Text style={styles.sheetActionIcon}>📲</Text>
-          <Text style={styles.sheetActionText}>端末カレンダーにエクスポート</Text>
-        </TouchableOpacity>
-
         <TouchableOpacity
           style={[styles.sheetAction, styles.sheetActionDanger]}
           onPress={() => { onClose(); onDelete(event); }}
@@ -177,7 +170,6 @@ function EventActionSheet({
           <Text style={styles.sheetActionIcon}>🗑️</Text>
           <Text style={[styles.sheetActionText, styles.sheetActionTextDanger]}>削除する</Text>
         </TouchableOpacity>
-
         <TouchableOpacity style={styles.sheetCancel} onPress={onClose}>
           <Text style={styles.sheetCancelText}>キャンセル</Text>
         </TouchableOpacity>
@@ -190,20 +182,20 @@ function EventActionSheet({
 export default function HomeScreen() {
   const insets = useSafeAreaInsets();
   const { isBgEnabled, bgUri: fixedBgUri, bgUris, bgMode, appTheme } = useSettingsStore();
-  const { getEventsForDate, removeEvent } = useEventStore();
-  useEventStore((state) => state.events);
+  const { getEventsForDate, removeEvent } = useNativeCalendarStore();
+  useNativeCalendarStore((state) => state.eventsByDate);
 
   const today = new Date();
   const [currentDateObj, setCurrentDateObj] = useState(today);
-  const [prevDateObj, setPrevDateObj] = useState(() => {
-    const d = new Date(today); d.setDate(d.getDate() - 1); return d;
-  });
-  const [nextDateObj, setNextDateObj] = useState(() => {
-    const d = new Date(today); d.setDate(d.getDate() + 1); return d;
-  });
+  const [prevDateObj, setPrevDateObj] = useState(() => { const d = new Date(today); d.setDate(d.getDate() - 1); return d; });
+  const [nextDateObj, setNextDateObj] = useState(() => { const d = new Date(today); d.setDate(d.getDate() + 1); return d; });
+  const [selectedEvent, setSelectedEvent] = useState<NativeCalendarEvent | null>(null);
 
-  // アクションシート用
-  const [selectedEvent, setSelectedEvent] = useState<CalendarEvent | null>(null);
+  useFocusEffect(
+    useCallback(() => {
+      useNativeCalendarStore.getState().fetchAll();
+    }, [])
+  );
 
   const pan = useRef(new Animated.ValueXY()).current;
   const lastDateRef = useRef(currentDateObj);
@@ -250,21 +242,22 @@ export default function HomeScreen() {
     return bgUris[seed % bgUris.length];
   };
 
-  // 予定タップ: iOS は ActionSheetIOS、Android はカスタムシート
-  const handleEventPress = useCallback((evt: CalendarEvent) => {
+  const handleEventPress = useCallback((evt: NativeCalendarEvent) => {
     if (Platform.OS === 'ios') {
       ActionSheetIOS.showActionSheetWithOptions(
         {
           title: evt.title,
-          message: evt.date,
-          options: ['キャンセル', '✏️ 編集する', '📲 カレンダーへ', '🗑️ 削除する'],
+          message: toDateStr(evt.startDate),
+          options: ['キャンセル', '✏️ 編集する', '🗑️ 削除する'],
           cancelButtonIndex: 0,
-          destructiveButtonIndex: 3,
+          destructiveButtonIndex: 2,
         },
-        (idx) => {
-          if (idx === 1) router.push({ pathname: '/modal', params: { eventId: String(evt.id) } });
-          if (idx === 2) handleExport(evt);
-          if (idx === 3) handleDelete(evt);
+        async (idx) => {
+          if (idx === 1) {
+            await Calendar.editEventInCalendarAsync({ id: evt.id });
+            useNativeCalendarStore.getState().fetchAll();
+          }
+          if (idx === 2) handleDelete(evt);
         }
       );
     } else {
@@ -272,22 +265,19 @@ export default function HomeScreen() {
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const handleDelete = (evt: CalendarEvent) => {
+  const handleDelete = (evt: NativeCalendarEvent) => {
     Alert.alert('削除の確認', `「${evt.title}」を削除しますか？`, [
       { text: 'キャンセル', style: 'cancel' },
-      { text: '削除', style: 'destructive', onPress: () => removeEvent(evt.id) },
+      { text: '削除', style: 'destructive', onPress: () => removeEvent(evt.id, toDateStr(evt.startDate)) },
     ]);
   };
 
-  const handleExport = async (evt: CalendarEvent) => {
-    const id = await exportEventToNativeCalendar({ title: evt.title, dateStr: evt.date });
-    if (id) Alert.alert('完了', '端末カレンダーにエクスポートしました ✓');
+  const handleEdit = async (evt: NativeCalendarEvent) => {
+    await Calendar.editEventInCalendarAsync({ id: evt.id });
+    useNativeCalendarStore.getState().fetchAll();
   };
 
-  const handleEdit = (evt: CalendarEvent) => {
-    router.push({ pathname: '/modal', params: { eventId: String(evt.id) } });
-  };
-
+  // ── カードレンダリング ──────────────────────────────────────────────────
   const renderCard = (dObj: Date) => {
     const year  = dObj.getFullYear();
     const month = dObj.getMonth() + 1;
@@ -299,24 +289,26 @@ export default function HomeScreen() {
     const bgUri     = getBgUri(dObj);
     const events    = getEventsForDate(dateStr);
 
+    const imageH = bgUri ? IMAGE_HEADER_H : NO_IMAGE_HEADER_H;
+    const eventsAreaH = CARD_HEIGHT - BINDING_H - imageH - DATE_SECTION_H - 16;
+
     return (
-      <View style={styles.cardInner}>
-        {/* バインダー穴 */}
+      <View style={[styles.cardInner, { height: CARD_HEIGHT }]}>
+
         <View style={styles.bindingContainer}>
           {[1,2,3,4,5,6].map((i) => <View key={i} style={styles.hole} />)}
         </View>
 
-        {/* 画像 or グラデーションフォールバック */}
         {bgUri ? (
-          <View style={styles.imageHeader}>
-            <Image source={{ uri: bgUri }} style={styles.cardImage} contentFit="cover" />
+          <View style={[styles.imageHeader, { height: imageH }]}>
+            <Image source={{ uri: bgUri }} style={StyleSheet.absoluteFill} contentFit="cover" />
             <LinearGradient
               colors={['transparent', 'rgba(255,255,255,0.85)']}
-              style={styles.imageGradient}
+              style={[styles.imageGradient, { height: imageH * 0.5 }]}
             />
           </View>
         ) : (
-          <View style={[styles.imageHeader, styles.noImageHeader]}>
+          <View style={[styles.noImageHeader, { height: imageH }]}>
             <LinearGradient colors={getBackgroundGradient(appTheme)} style={StyleSheet.absoluteFill} />
             <Text style={styles.seasonDecor}>
               {month <= 3 ? '🌸' : month <= 6 ? '🌿' : month <= 9 ? '🌻' : '🍁'}
@@ -324,15 +316,16 @@ export default function HomeScreen() {
           </View>
         )}
 
-        {/* 日付エリア */}
-        <View style={[styles.dateArea, !bgUri && styles.dateAreaCompact]}>
+        <View style={[styles.dateSection, { height: DATE_SECTION_H }]}>
           {todayFlag && (
-            <View style={styles.todayBadge}><Text style={styles.todayBadgeText}>TODAY</Text></View>
+            <View style={styles.todayBadge}>
+              <Text style={styles.todayBadgeText}>TODAY</Text>
+            </View>
           )}
           <Text style={styles.yearMonth}>{`${year}年 ${month}月`}</Text>
           <View style={styles.dateRow}>
             <Text
-              style={[styles.day, { color: dayColor, fontSize: bgUri ? 62 : 82 }]}
+              style={[styles.day, { color: dayColor }]}
               adjustsFontSizeToFit
               numberOfLines={1}
             >
@@ -340,19 +333,18 @@ export default function HomeScreen() {
             </Text>
             <Text style={[styles.dayOfWeek, { color: dayColor }]}>({dayStr})</Text>
           </View>
-
-          <View style={styles.divider} />
-
-          {/* 予定リスト — スクロール対応 + タップ操作 */}
-          <ScrollView
-            style={styles.eventsScroll}
-            contentContainerStyle={styles.eventsScrollContent}
-            nestedScrollEnabled
-            showsVerticalScrollIndicator={false}
-          >
-            <EventList events={events} onEventPress={handleEventPress} />
-          </ScrollView>
         </View>
+
+        <View style={styles.divider} />
+
+        <View style={[styles.eventsContainer, { height: eventsAreaH }]}>
+          <EventList
+            events={events}
+            onEventPress={handleEventPress}
+            availableHeight={eventsAreaH}
+          />
+        </View>
+
       </View>
     );
   };
@@ -362,22 +354,20 @@ export default function HomeScreen() {
   return (
     <LinearGradient colors={bgGrad} style={styles.container} {...panResponder.panHandlers}>
       <View style={[styles.inner, { paddingTop: insets.top + 8, paddingBottom: insets.bottom + 88 }]}>
+
         <View style={styles.swipeHintWrap}>
           <Text style={styles.swipeHint}>↕ スワイプで日付切り替え</Text>
         </View>
 
-        {/* Layer 1: 次の日（背面） */}
         <Animated.View style={[styles.card, styles.absolute, styles.shadow]}>
           {renderCard(nextDateObj)}
         </Animated.View>
 
-        {/* Layer 2: 今日（中間）— 下スワイプで落ちる */}
         <Animated.View style={[styles.card, styles.absolute, styles.shadow,
           { transform: [{ translateY: currentTranslateY }, { rotateZ: currentRotateZ }] }]}>
           {renderCard(currentDateObj)}
         </Animated.View>
 
-        {/* Layer 3: 前の日（前面）— 上スワイプで出てくる */}
         <Animated.View
           style={[styles.card, styles.absolute, styles.shadow,
             { transform: [{ translateY: prevTranslateY }, { rotateZ: prevRotateZ }] }]}
@@ -385,16 +375,15 @@ export default function HomeScreen() {
         >
           {renderCard(prevDateObj)}
         </Animated.View>
+
       </View>
 
-      {/* Android 用アクションシート */}
       {Platform.OS !== 'ios' && (
         <EventActionSheet
           event={selectedEvent}
           onClose={() => setSelectedEvent(null)}
           onEdit={handleEdit}
           onDelete={handleDelete}
-          onExport={handleExport}
         />
       )}
     </LinearGradient>
@@ -405,6 +394,7 @@ export default function HomeScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1 },
   inner: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+
   swipeHintWrap: {
     position: 'absolute', top: 12, alignSelf: 'center',
     paddingHorizontal: 14, paddingVertical: 5,
@@ -412,17 +402,24 @@ const styles = StyleSheet.create({
   },
   swipeHint: { fontSize: 11, color: 'rgba(0,0,0,0.45)', fontWeight: '500', letterSpacing: 0.3 },
 
-  card: { width: CARD_WIDTH, backgroundColor: '#fff', borderRadius: 16, overflow: 'hidden' },
+  card: {
+    width: CARD_WIDTH,
+    height: CARD_HEIGHT,
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    overflow: 'hidden',
+  },
   absolute: { position: 'absolute' },
   shadow: {
     shadowColor: '#000', shadowOffset: { width: 0, height: 12 },
     shadowOpacity: 0.18, shadowRadius: 24, elevation: 12,
   },
-  cardInner: { width: '100%' },
 
-  // バインダー
+  cardInner: { width: '100%', flexDirection: 'column' },
+
   bindingContainer: {
-    height: 32, backgroundColor: '#f1f3f5',
+    height: BINDING_H,
+    backgroundColor: '#f1f3f5',
     flexDirection: 'row', justifyContent: 'space-evenly', alignItems: 'center',
     borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: '#e0e0e0',
     paddingHorizontal: 24,
@@ -433,73 +430,72 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.6, shadowRadius: 3, elevation: 3,
   },
 
-  // 画像
-  imageHeader: { width: '100%', aspectRatio: 1.6, backgroundColor: '#e0e0e0', overflow: 'hidden' },
-  noImageHeader: { aspectRatio: 2.2, alignItems: 'center', justifyContent: 'center' },
-  cardImage: { width: '100%', height: '100%' },
-  imageGradient: { position: 'absolute', bottom: 0, left: 0, right: 0, height: '50%' },
-  seasonDecor: { fontSize: 48, opacity: 0.5 },
+  imageHeader: { width: '100%', overflow: 'hidden', position: 'relative' },
+  noImageHeader: { width: '100%', alignItems: 'center', justifyContent: 'center' },
+  imageGradient: { position: 'absolute', bottom: 0, left: 0, right: 0 },
+  seasonDecor: { fontSize: 40, opacity: 0.5 },
 
-  // 日付
-  dateArea: { paddingHorizontal: 20, paddingTop: 14, paddingBottom: 12, alignItems: 'center' },
-  dateAreaCompact: { paddingTop: 20, paddingBottom: 16 },
+  dateSection: {
+    paddingHorizontal: 20,
+    paddingTop: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
   todayBadge: {
     backgroundColor: '#e63946', paddingHorizontal: 10,
-    paddingVertical: 3, borderRadius: 20, marginBottom: 4,
+    paddingVertical: 2, borderRadius: 20, marginBottom: 2,
   },
   todayBadgeText: { color: '#fff', fontSize: 10, fontWeight: '800', letterSpacing: 1.5 },
-  yearMonth: { fontSize: 15, fontWeight: '600', color: '#888', letterSpacing: 0.5, marginBottom: 2 },
-  dateRow: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'center', width: '100%', paddingHorizontal: 10 },
-  day: { fontWeight: '800', letterSpacing: -2, lineHeight: 95 },
-  dayOfWeek: { fontSize: 22, fontWeight: '700', marginLeft: 6, flexShrink: 1 },
-  divider: { width: '75%', height: 1.5, backgroundColor: '#ececec', marginVertical: 10, borderRadius: 1 },
-
-  // 予定スクロール
-  eventsScroll: {
-    width: '100%',
-    maxHeight: SCREEN_HEIGHT * 0.20, // 画面高さの20%まで
+  yearMonth: { fontSize: 14, fontWeight: '600', color: '#888', letterSpacing: 0.5 },
+  dateRow: {
+    flexDirection: 'row', alignItems: 'baseline',
+    justifyContent: 'center', width: '100%', paddingHorizontal: 10,
   },
-  eventsScrollContent: { paddingBottom: 4 },
+  day: { fontWeight: '800', fontSize: 80, letterSpacing: -2, lineHeight: 88 },
+  dayOfWeek: { fontSize: 22, fontWeight: '700', marginLeft: 6 },
 
-  // 予定リスト
-  eventListWrapper: { width: '100%' },
+  divider: {
+    width: '80%', height: 1.5, backgroundColor: '#ececec',
+    alignSelf: 'center',
+    borderRadius: 1,
+  },
+
+  eventsContainer: {
+    width: '100%',
+    paddingHorizontal: 12,
+    paddingTop: 4,
+    overflow: 'hidden',
+  },
+  eventScrollContent: { paddingBottom: 4 },
+
   eventTag: {
     flexDirection: 'row', alignItems: 'center',
     borderLeftWidth: 3, borderRadius: 8,
-    paddingHorizontal: 10, paddingVertical: 8,
-    marginBottom: 6, gap: 8,
+    paddingHorizontal: 10, paddingVertical: 7,
+    marginBottom: 5, gap: 8,
   },
-  eventIcon: { fontSize: 15 },
-  eventText: { fontSize: 14, fontWeight: '600', flex: 1 },
-  eventChevron: { fontSize: 18, color: '#ccc', fontWeight: '300' },
+  eventIcon: { fontSize: 14 },
+  eventText: { fontSize: 13, fontWeight: '600' },
+  eventTime: { fontSize: 11, color: '#888', marginTop: 1 },
+  eventChevron: { fontSize: 16, color: '#ccc', fontWeight: '300' },
 
-  // 展開ボタン
-  expandButton: {
-    alignItems: 'center', paddingVertical: 6,
-    marginTop: 2, marginBottom: 4,
-  },
+  expandButton: { alignItems: 'center', paddingVertical: 5 },
   expandButtonText: { fontSize: 12, color: '#0a7ea4', fontWeight: '700' },
 
-  // Empty State
-  emptyState: { alignItems: 'center', paddingVertical: 16, gap: 4 },
-  emptyIcon: { fontSize: 28, marginBottom: 4 },
-  noEventsText: { fontSize: 14, color: '#aaa', fontWeight: '500' },
-  noEventsHint: { fontSize: 12, color: '#ccc' },
+  emptyState: { alignItems: 'center', paddingVertical: 12, gap: 4 },
+  emptyIcon: { fontSize: 24, marginBottom: 2 },
+  noEventsText: { fontSize: 13, color: '#aaa', fontWeight: '500' },
+  noEventsHint: { fontSize: 11, color: '#ccc' },
 
-  // ── Android アクションシート ──
   sheetOverlay: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(0,0,0,0.45)',
-    justifyContent: 'flex-end',
-    zIndex: 100,
+    justifyContent: 'flex-end', zIndex: 100,
   },
   sheetContainer: {
-    backgroundColor: '#fff',
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    paddingHorizontal: 20,
-    paddingBottom: 32,
-    paddingTop: 12,
+    backgroundColor: '#fff', borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    paddingHorizontal: 20, paddingBottom: 32, paddingTop: 12,
   },
   sheetHandle: {
     width: 40, height: 4, backgroundColor: '#d1d5db',
